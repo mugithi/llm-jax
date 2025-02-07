@@ -118,17 +118,16 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
 
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
     # Use the first input matrix to determine the number of bytes.
-    num_bytes = args[0].size * 4  # Assuming all input arrays are float32 and of the same shape.
+    num_bytes = args[0].size * 2  # Assuming all input arrays are float32 and of the same shape.
     # For A+B, we expect 3 transfers (2 reads + 1 write).
     # For A+B+C, if computed sequentially without fusion, we get two additions, i.e. 6 transfers.
-    multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
-    total_num_bytes_crossing_hbm = multiplier * num_bytes
-
+    # multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
+    # total_num_bytes_crossing_hbm = multiplier * num_bytes
+    total_num_bytes_crossing_hbm = 3 * num_bytes
     print(f"\n\n","_"*90)
-    print(f"\nTo view the profile for {task}, run: tensorboard --logdir={profile_dir}")
-    print(f"\nArthmetic Intensity: {total_flops / total_num_bytes_crossing_hbm:.2f}")
-    print(f"\nAverage time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
-    print(f"\n\n","_"*90)
+    print(f"To view the profile for {task}, run: tensorboard --logdir={profile_dir}")
+    print(f"Arthmetic Intensity: {total_flops / total_num_bytes_crossing_hbm:.2f}")
+    print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
 
 if __name__ == "__main__":
     profile_dir = "/tmp/profile_me"
@@ -155,6 +154,12 @@ if __name__ == "__main__":
                         help="Use Jax.jit to compile a matmul function")
     parser.add_argument("--p8", action="store_true",
                         help="Vary the size of Matrix dimension and measure the arithmetic intensity")
+    parser.add_argument("--p9", action="store_true",
+                        help="Compare jitted vs non-jitted matmul+relu for different matrix sizes")
+    parser.add_argument("--p10", action="store_true",
+                        help="Compare jitted vs non-jitted matmul+relu for different matrix sizes")
+    parser.add_argument("--p11", action="store_true",
+                        help="Test attention-like matrix multiplication pattern")
     args = parser.parse_args()
 
     if args.mem:
@@ -204,17 +209,97 @@ if __name__ == "__main__":
         print("\n[Vary the size of Matrix dimension and measure the arithmetic intensity]")
         for MATRIX_DIM in [64, 128, 256, 512, 1024, 2048, 4096]:
             NUM_MATRICES = 2**27 // MATRIX_DIM**2
-            total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
-            A = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
-            B = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
+            # For each matrix multiplication:
+            # - Each element in result requires MATRIX_DIM multiplications and (MATRIX_DIM-1) additions
+            # - Output matrix size is MATRIX_DIM x MATRIX_DIM
+            # - Total ops per matrix = MATRIX_DIM * MATRIX_DIM * (2*MATRIX_DIM)
+            # - Multiply by batch size (NUM_MATRICES)
+            total_flops = NUM_MATRICES * 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
+
+            A = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
+            B = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
             def f(A, B):
-                return A + B
-            total_flops = NUM_MATRICES * MATRIX_DIM * MATRIX_DIM  # Account for all matrices
-            task_name = f"matrix_addition_{MATRIX_DIM}x{MATRIX_DIM}_x_{NUM_MATRICES}"
-            part_3(f, A, B, total_flops=total_flops, task=task_name, profile_dir=profile_dir)
+                return jax.lax.batch_matmul(A, B)
+            jit_f = jax.jit(f)
+            task_name = f"MATRIX: {MATRIX_DIM}"
+            part_3(f, A, B, total_flops=total_flops, task="No Jit " + task_name, profile_dir=profile_dir)
+            part_3(jit_f, A, B, total_flops=total_flops, task="Jit " + task_name, profile_dir=profile_dir)
+    if args.p9:
+        print("\n[Compare jitted vs non-jitted matmul+relu for different matrix sizes]")
+        for MATRIX_DIM in [64, 128, 256, 512, 1024, 2048, 4096]:
+            # Create square matrices
+            A = jnp.ones((MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
+            B = jnp.ones((MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
 
+            def f(A, B):
+                return jax.nn.relu(A @ B)
 
+            jit_f = jax.jit(f)
 
+            # Calculate total FLOPs: matmul (2*N^3) + ReLU (N^2)
+            total_flops = 2 * MATRIX_DIM**3 + MATRIX_DIM**2
+
+            task_name = f"MATRIX_SIZE_{MATRIX_DIM}"
+            # Run both versions and compare
+            part_3(f, A, B, total_flops=total_flops, task="No Jit " + task_name, profile_dir=profile_dir)
+            part_3(jit_f, A, B, total_flops=total_flops, task="Jit " + task_name, profile_dir=profile_dir)
+    if args.p10:
+        print("\n[Compare jitted vs non-jitted matmul+relu for different matrix sizes]")
+        for MATRIX_DIM in [64, 128, 256, 512, 1024, 2048, 4096]:
+            # Create square matrices
+            A = jnp.ones((MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
+            B = jnp.ones((MATRIX_DIM, MATRIX_DIM), dtype=jnp.float16)
+
+            def f(A, B):
+                return jax.nn.relu(A @ B)
+
+            jit_f = jax.jit(f)
+
+            # Calculate total FLOPs: matmul (2*N^3) + ReLU (N^2)
+            total_flops = 2 * MATRIX_DIM**3 + MATRIX_DIM**2
+
+            task_name = f"MATRIX_SIZE_{MATRIX_DIM}"
+            # Run both versions and compare
+            part_3(f, A, B, total_flops=total_flops, task="No Jit " + task_name, profile_dir=profile_dir)
+            part_3(jit_f, A, B, total_flops=total_flops, task="Jit " + task_name, profile_dir=profile_dir)
+    if args.p11:
+        print("\n[Attention-like matrix multiplication pattern]")
+        SEQUENCE = 10000
+        KV_HEAD = 128
+
+        # Create matrices with attention-like dimensions
+        A = jnp.ones((SEQUENCE, KV_HEAD), dtype=jnp.float16)  # [SEQUENCE, KV_HEAD]
+        B = jnp.ones((KV_HEAD, SEQUENCE), dtype=jnp.float16)  # [KV_HEAD, SEQUENCE]
+        C = jnp.ones((KV_HEAD, SEQUENCE), dtype=jnp.float16)  # [KV_HEAD, SEQUENCE]
+
+        def f(A, B, C):
+            intermediate = A @ B  # [SEQUENCE, SEQUENCE]
+            activated = jax.nn.relu(intermediate)  # [SEQUENCE, SEQUENCE]
+            return C @ activated  # [KV_HEAD, SEQUENCE]
+
+        jit_f = jax.jit(f)
+
+        # Calculate memory requirements
+        input_bytes = (A.size + B.size + C.size) * 2  # float16 = 2 bytes
+        output_bytes = (KV_HEAD * SEQUENCE) * 2  # Output matrix size * 2 bytes
+        print(f"\nMemory Analysis:")
+        print(f"Input bytes: {input_bytes / 1e6:.2f} MB")
+        print(f"Output bytes: {output_bytes / 1e6:.2f} MB")
+        print(f"Peak memory (including intermediate): {(input_bytes + (SEQUENCE * SEQUENCE * 2) + output_bytes) / 1e6:.2f} MB")
+
+        # Calculate FLOPs
+        flops_AB = 2 * SEQUENCE * KV_HEAD * SEQUENCE  # First matmul
+        flops_relu = SEQUENCE * SEQUENCE  # ReLU operation
+        flops_C = 2 * KV_HEAD * SEQUENCE * SEQUENCE  # Second matmul
+        total_flops = flops_AB + flops_relu + flops_C
+
+        print(f"\nCompute Analysis:")
+        print(f"Total FLOPs: {total_flops / 1e9:.2f} GFLOPs")
+        print(f"Theoretical arithmetic intensity: {total_flops / input_bytes:.2f} FLOPs/byte")
+
+        # Run both versions
+        part_3(f, A, B, C, total_flops=total_flops, task="No Jit Attention-like", profile_dir=profile_dir)
+        part_3(jit_f, A, B, C, total_flops=total_flops, task="Jit Attention-like", profile_dir=profile_dir)
 
 
 
