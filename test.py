@@ -67,7 +67,7 @@ def main_benchmark():
 
     avg_time = (endtime - starttime).total_seconds() / STEPS
     print(f"Average time per step: {avg_time:.4f} seconds")
-    print(f"{avg_time:.4f} tera flops per sec {total_num_flops / avg_time / 1e12:.2f} gigabytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
+    print(f"{avg_time:.4f} tera flops per sec {total_num_flops / avg_time / 1e12:.2f} bytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TPU Memory Test and Benchmark")
