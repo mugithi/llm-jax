@@ -115,7 +115,6 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
         outcomes_ms.append((e - s).total_seconds() * 1000)
 
     jax.profiler.stop_trace()
-    print(f"To view the profile, run: tensorboard --logdir={profile_dir}")
 
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
     # Use the first input matrix to determine the number of bytes.
@@ -125,7 +124,11 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
     total_num_bytes_crossing_hbm = multiplier * num_bytes
 
-    print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
+    print(f"\n\n","_"*90)
+    print(f"\nTo view the profile for {task}, run: tensorboard --logdir={profile_dir}")
+    print(f"\nArthmetic Intensity: {total_flops / total_num_bytes_crossing_hbm:.2f}")
+    print(f"\nAverage time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
+    print(f"\n\n","_"*90)
 
 if __name__ == "__main__":
     profile_dir = "/tmp/profile_me"
@@ -150,6 +153,8 @@ if __name__ == "__main__":
                         help="Use Jax.jit to compile the function - A+B  DOES NOT requires operator fusion")
     parser.add_argument("--p7", action="store_true",
                         help="Use Jax.jit to compile a matmul function")
+    parser.add_argument("--p8", action="store_true",
+                        help="Vary the size of Matrix dimension and measure the arithmetic intensity")
     args = parser.parse_args()
 
     if args.mem:
@@ -192,9 +197,23 @@ if __name__ == "__main__":
         def f(A, B):
             return jax.nn.relu(A @ B)
         jit_f = jax.jit(f)
-        total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
+        total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
         part_3(f, A, B, total_flops=total_flops, task="No Jit Matmul", profile_dir=profile_dir)
-        part_3(jit_f, A, B, total_flops=MATRIX_DIM * MATRIX_DIM, task="Jit Matmul", profile_dir=profile_dir)
+        part_3(jit_f, A, B, total_flops=total_flops, task="Jit Matmul", profile_dir=profile_dir)
+    if args.p8:
+        print("\n[Vary the size of Matrix dimension and measure the arithmetic intensity]")
+        for MATRIX_DIM in [64, 128, 256, 512, 1024, 2048, 4096]:
+            NUM_MATRICES = 2**20 // MATRIX_DIM**2
+            total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
+            A = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
+            B = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
+            def f(A, B):
+                return A + B
+            total_flops = NUM_MATRICES * MATRIX_DIM * MATRIX_DIM  # Account for all matrices
+            task_name = f"matrix_addition_{MATRIX_DIM}x{MATRIX_DIM}_x_{NUM_MATRICES}"
+            part_3(f, A, B, total_flops=total_flops, task=task_name, profile_dir=profile_dir)
+
+
 
 
 
