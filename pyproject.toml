@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "llm-jax"
+version = "0.1.0"
+description = "JAX Benchmarking Project"
+authors = ["mugithi <isackaranja@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+grpcio = "1.60.1"
+grpcio-status = "1.60.1"
+jax = "*"
+jaxlib = "*"
+tensorflow = "*"
+absl-py = "*"
+numpy = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -1,5 +1,7 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
 import sys
 import contextlib
 # Temporarily redirect stderr to suppress early log messages from absl
@@ -92,7 +94,7 @@ def part_2(A, B, profile_dir = None):
     avg_time = (endtime - starttime).total_seconds() / STEPS
     print(f"Average time per step {avg_time:.4f} seconds | tera flops per sec {total_num_flops / avg_time / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
 
-def part_3(f, *args, tries=10, task = None, profile_dir = None):
+def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     """
      Simple utility to time a function for multiple runs.
      Returns the average time and the minimum time.
@@ -110,7 +112,7 @@ def part_3(f, *args, tries=10, task = None, profile_dir = None):
         s = datetime.datetime.now()
         jax.block_until_ready(f(*args))
         e = datetime.datetime.now()
-        outcomes_ms.append((e-s).total_seconds() * 1000)
+        outcomes_ms.append((e - s).total_seconds() * 1000)
 
     jax.profiler.stop_trace()
     print(f"To view the profile, run: tensorboard --logdir={profile_dir}")
@@ -118,15 +120,12 @@ def part_3(f, *args, tries=10, task = None, profile_dir = None):
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
     # Use the first input matrix to determine the number of bytes.
     num_bytes = args[0].size * 4  # Assuming all input arrays are float32 and of the same shape.
-    total_num_flops = MATRIX_DIM * MATRIX_DIM
     # For A+B, we expect 3 transfers (2 reads + 1 write).
     # For A+B+C, if computed sequentially without fusion, we get two additions, i.e. 6 transfers.
     multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
     total_num_bytes_crossing_hbm = multiplier * num_bytes
 
-
-    print(f"Average time per step {average_time_ms:.4f} seconds | tera flops per sec {total_num_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
-
+    print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
 
 if __name__ == "__main__":
     profile_dir = "/tmp/profile_me"
@@ -149,6 +148,8 @@ if __name__ == "__main__":
                         help="Use Jax.jit to compile the function - A+B+C requires operator fusion")
     parser.add_argument("--p6", action="store_true",
                         help="Use Jax.jit to compile the function - A+B  DOES NOT requires operator fusion")
+    parser.add_argument("--p7", action="store_true",
+                        help="Use Jax.jit to compile a matmul function")
     args = parser.parse_args()
 
     if args.mem:
@@ -166,26 +167,37 @@ if __name__ == "__main__":
         print("\n[Function Profiling A+B] Profiling the execution of a specified function (A+B) over multiple iterations to measure average and best performance metrics:")
         def f(A, B):
             return A + B
-        part_3(f, A, B, task="matrix_addition", profile_dir=profile_dir)
+        part_3(f, A, B, total_flops=MATRIX_DIM * MATRIX_DIM, task="matrix_addition", profile_dir=profile_dir)
     if args.p4:
         print("\n[Benchmark A+B+C] Timing matrix addition for three matrices (A+B+C) over multiple iterations to measure execution performance metrics:")
         def f(A, B, C):
             return A + B + C
-        part_3(f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
+        part_3(f, A, B, C, total_flops=3*MATRIX_DIM*MATRIX_DIM, task="matrix_addition", profile_dir=profile_dir)
     if args.p5:
         print("\n[JIT Compile A+B+C] Using Jax.jit to compile the function for operator fusion (A+B+C requires operator fusion):")
         def f(A, B, C):
             return A + B + C
         jit_f = jax.jit(f)
-        part_3(f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
-        part_3(jit_f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
+        part_3(f, A, B, C, total_flops=3*MATRIX_DIM*MATRIX_DIM, task="No Jit addition no fusion required", profile_dir=profile_dir)
+        part_3(jit_f, A, B, C, total_flops=3*MATRIX_DIM*MATRIX_DIM, task="Jit addition no fusion required", profile_dir=profile_dir)
     if args.p6:
         print("\n[JIT Compile A+B] Using Jax.jit to compile the function for A+B (operator fusion is not required):")
         def f(A, B):
             return A + B
         jit_f = jax.jit(f)
-        part_3(f, A, B, task="matrix_addition", profile_dir=profile_dir)
-        part_3(jit_f, A, B, task="matrix_addition", profile_dir=profile_dir)
+        part_3(f, A, B, total_flops=MATRIX_DIM * MATRIX_DIM, task="No Jit Addition no fusion required", profile_dir=profile_dir)
+        part_3(jit_f, A, B, total_flops=MATRIX_DIM * MATRIX_DIM, task="Jit Addition no fusion required", profile_dir=profile_dir)
+    if args.p7:
+        print("\n[Use Jax.jit to compile a matmul function:")
+        def f(A, B):
+            return jax.nn.relu(A @ B)
+        jit_f = jax.jit(f)
+        total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
+        part_3(f, A, B, total_flops=total_flops, task="No Jit Matmul", profile_dir=profile_dir)
+        part_3(jit_f, A, B, total_flops=MATRIX_DIM * MATRIX_DIM, task="Jit Matmul", profile_dir=profile_dir)
+
+
+
 
 
 
