@@ -1,3 +1,12 @@
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import sys
+import contextlib
+# Temporarily redirect stderr to suppress early log messages from absl
+with open(os.devnull, 'w') as devnull, contextlib.redirect_stderr(devnull):
+    import absl.logging
+    absl.logging.set_verbosity(absl.logging.ERROR)
+    absl.logging.set_stderrthreshold("error")
 import datetime
 import jax
 import jax.numpy as jnp
@@ -106,47 +115,77 @@ def part_3(f, *args, tries=10, task = None, profile_dir = None):
     jax.profiler.stop_trace()
     print(f"To view the profile, run: tensorboard --logdir={profile_dir}")
 
-    avg_time = sum(outcomes_ms) / len(outcomes_ms)
-    num_bytes = A.size * 4 # Because we are using float32
+    average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
+    # Use the first input matrix to determine the number of bytes.
+    num_bytes = args[0].size * 4  # Assuming all input arrays are float32 and of the same shape.
     total_num_flops = MATRIX_DIM * MATRIX_DIM
-    total_num_bytes_crossing_hbm = 3 * num_bytes
+    # For A+B, we expect 3 transfers (2 reads + 1 write).
+    # For A+B+C, if computed sequentially without fusion, we get two additions, i.e. 6 transfers.
+    multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
+    total_num_bytes_crossing_hbm = multiplier * num_bytes
 
 
-    print(f"Average time per step {avg_time:.4f} seconds | tera flops per sec {total_num_flops / avg_time / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
+    print(f"Average time per step {average_time_ms:.4f} seconds | tera flops per sec {total_num_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
 
 
 if __name__ == "__main__":
     profile_dir = "/tmp/profile_me"
     A = jnp.ones((MATRIX_DIM, MATRIX_DIM))
     B = jnp.ones((MATRIX_DIM, MATRIX_DIM))
+    C = jnp.ones((MATRIX_DIM, MATRIX_DIM))
 
     parser = argparse.ArgumentParser(description="TPU Memory Test and Benchmarks")
     parser.add_argument("--mem", action="store_true",
                         help="Run memory allocation check and exit")
     parser.add_argument("--p1", action="store_true",
-                        help="Run part 01")
+                        help="Perform matrix addition benchmark (A+B) over multiple iterations to measure execution performance metrics")
     parser.add_argument("--p2", action="store_true",
-                        help="Run profiling")
+                        help="Run the benchmark with profiling enabled for matrix addition (A+B) and capturing execution trace for TensorBoard")
     parser.add_argument("--p3", action="store_true",
-                        help="Run function profiling and timing")
+                        help="Profile the execution of a specified function (A+B) over multiple iterations to measure average and best performance metrics")
+    parser.add_argument("--p4", action="store_true",
+                        help="Timing matrix addition for three matrices (A+B+C) over multiple iterations to measure execution performance metrics")
+    parser.add_argument("--p5", action="store_true",
+                        help="Use Jax.jit to compile the function - A+B+C requires operator fusion")
+    parser.add_argument("--p6", action="store_true",
+                        help="Use Jax.jit to compile the function - A+B  DOES NOT requires operator fusion")
     args = parser.parse_args()
 
     if args.mem:
-        print("\nRunning memory allocation check:")
+        print("\n[Memory Check] Running memory allocation check and exit:")
         print_memory_usage()
         gc.collect()
         jax.clear_caches()
     if args.p1:
-        print("\nRunning benchmark 01:")
+        print("\n[Benchmark A+B] Running matrix addition benchmark (A+B) over multiple iterations to measure execution performance metrics:")
         part_1(A, B)
     if args.p2:
-        print("\nRunning tensorboard:")
+        print("\n[Profiling A+B] Running benchmark with profiling enabled for matrix addition (A+B) and capturing execution trace for TensorBoard:")
         part_2(A, B, profile_dir)
     if args.p3:
-        print("\nRunning benchmark 03:")
+        print("\n[Function Profiling A+B] Profiling the execution of a specified function (A+B) over multiple iterations to measure average and best performance metrics:")
         def f(A, B):
             return A + B
-        part_3(f,A,B, task="matrix_addition", profile_dir=profile_dir)
+        part_3(f, A, B, task="matrix_addition", profile_dir=profile_dir)
+    if args.p4:
+        print("\n[Benchmark A+B+C] Timing matrix addition for three matrices (A+B+C) over multiple iterations to measure execution performance metrics:")
+        def f(A, B, C):
+            return A + B + C
+        part_3(f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
+    if args.p5:
+        print("\n[JIT Compile A+B+C] Using Jax.jit to compile the function for operator fusion (A+B+C requires operator fusion):")
+        def f(A, B, C):
+            return A + B + C
+        jit_f = jax.jit(f)
+        part_3(f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
+        part_3(jit_f, A, B, C, task="matrix_addition", profile_dir=profile_dir)
+    if args.p6:
+        print("\n[JIT Compile A+B] Using Jax.jit to compile the function for A+B (operator fusion is not required):")
+        def f(A, B):
+            return A + B
+        jit_f = jax.jit(f)
+        part_3(f, A, B, task="matrix_addition", profile_dir=profile_dir)
+        part_3(jit_f, A, B, task="matrix_addition", profile_dir=profile_dir)
 
 
 
