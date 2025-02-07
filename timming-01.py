@@ -203,7 +203,7 @@ if __name__ == "__main__":
     if args.p8:
         print("\n[Vary the size of Matrix dimension and measure the arithmetic intensity]")
         for MATRIX_DIM in [64, 128, 256, 512, 1024, 2048, 4096]:
-            NUM_MATRICES = 2**20 // MATRIX_DIM**2
+            NUM_MATRICES = 2**27 // MATRIX_DIM**2
             total_flops = 2 * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM * MATRIX_DIM
             A = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
             B = jnp.ones((NUM_MATRICES, MATRIX_DIM, MATRIX_DIM), dtype=jax.numpy.float32)
