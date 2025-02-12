@@ -17,6 +17,7 @@ import argparse
 import random
 import string
 import time
+import tensorflow as tf
 # Initialize TPU
 jax.devices('tpu')
 
@@ -30,6 +31,48 @@ print("Cleared memory cache")
 # Reduce matrix dimensions further to fit in TPU memory with replication
 MATRIX_DIM = 32768  # Reduced from 16384
 STEPS = 10
+
+from google.cloud import aiplatform
+from typing import Optional
+
+def upload_tensorboard_log_one_time_sample(
+    tensorboard_experiment_name: str,
+    logdir: str,
+    tensorboard_id: str,
+    project: str,
+    location: str,
+    experiment_display_name: Optional[str] = None,
+    run_name_prefix: Optional[str] = None,
+    description: Optional[str] = None,
+    verbosity: Optional[int] = 1,
+) -> None:
+    """Upload TensorBoard logs to Google Cloud AI Platform."""
+    print(f"\nUploading to TensorBoard:")
+    print(f"- Project: {project}")
+    print(f"- Location: {location}")
+    print(f"- TensorBoard ID: {tensorboard_id}")
+    print(f"- Experiment name: {tensorboard_experiment_name}")
+    print(f"- Local logdir: {logdir}")
+    print(f"- Directory contents:")
+    os.system(f"find {logdir} -type f")
+
+    aiplatform.init(project=project, location=location)
+
+    # one time upload with profile plugin enabled
+    try:
+        aiplatform.upload_tb_log(
+            tensorboard_id=tensorboard_id,
+            tensorboard_experiment_name=tensorboard_experiment_name,
+            logdir=logdir,
+            experiment_display_name=experiment_display_name,
+            run_name_prefix=run_name_prefix,
+            description=description,
+            allowed_plugins=frozenset(["profile"]),
+        )
+        print("Upload completed successfully")
+    except Exception as e:
+        print(f"Upload failed with error: {e}")
+        print("Full error details:", str(e))
 
 def print_memory_usage():
     devices = jax.devices()
@@ -95,41 +138,98 @@ def part_2(A, B, profile_dir = None):
     print(f"Average time per step {avg_time:.4f} seconds | tera flops per sec {total_num_flops / avg_time / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
 
 def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
-    """
-     Simple utility to time a function for multiple runs.
-     Returns the average time and the minimum time.
-    """
     assert task is not None, "Task must be provided"
 
-    trace_name = f"t_{task}_" + ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-    profile_dir = "/tmp/profile_me"
+    # Create clean base directory
+    base_dir = "/tmp/profile_me"
+    if os.path.exists(base_dir):
+        os.system(f"rm -rf {base_dir}")
+    os.makedirs(base_dir, exist_ok=True)
 
+    # Create run directory with simple name
+    run_name = "profile_run"
+    run_dir = os.path.join(base_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Create profile directory with expected structure
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    profile_dir = os.path.join(run_dir, 'plugins', 'profile', timestamp)
+    os.makedirs(profile_dir, exist_ok=True)
+
+    # Collect metrics and profile data
     outcomes_ms = []
-    jax.block_until_ready(f(*args)) # Warmup
-    jax.profiler.start_trace(profile_dir)
+    jax.block_until_ready(f(*args))  # Warmup
 
-    for _ in range(tries):
+    print(f"\nStarting profiling to: {profile_dir}")
+    # Start JAX profiler with Perfetto trace
+    jax.profiler.start_trace(profile_dir, create_perfetto_trace=True)
+
+    for i in range(tries):
         s = datetime.datetime.now()
-        jax.block_until_ready(f(*args))
+        result = f(*args)
+        jax.block_until_ready(result)
         e = datetime.datetime.now()
-        outcomes_ms.append((e - s).total_seconds() * 1000)
+        duration_ms = (e - s).total_seconds() * 1000
+        outcomes_ms.append(duration_ms)
 
+    # Stop JAX profiler
     jax.profiler.stop_trace()
+    time.sleep(2)  # Ensure profile data is written
 
+    # Print performance statistics
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
-    # Use the first input matrix to determine the number of bytes.
-    num_bytes = args[0].size * 2  # Assuming all input arrays are float32 and of the same shape.
-    # For A+B, we expect 3 transfers (2 reads + 1 write).
-    # For A+B+C, if computed sequentially without fusion, we get two additions, i.e. 6 transfers.
-    # multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
-    # total_num_bytes_crossing_hbm = multiplier * num_bytes
-    total_num_bytes_crossing_hbm = 3 * num_bytes
+    multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
+    total_num_bytes_crossing_hbm = multiplier * args[0].size * 2
+
     print(f"\n\n","_"*90)
-    print(f"To view the profile for {task}, run: tensorboard --logdir={profile_dir}")
+    print(f"Profile data location: {profile_dir}")
+    print(f"Directory structure:")
+    os.system(f"find {base_dir} -type f")
+
+    # Upload to managed TensorBoard
+    if os.path.exists(profile_dir):
+        print("\nUploading profile to managed TensorBoard...")
+
+        # Create valid experiment name - using hyphens instead of underscores
+        clean_task = ''.join(c.lower() for c in task if c.isalnum() or c == ' ').replace(' ', '-')[:20]
+        # Format timestamp with hyphens instead of underscores
+        upload_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # Changed format
+        experiment_name = f"exp-{upload_timestamp}-{clean_task}"
+
+        try:
+            aiplatform.init(project="cool-machine-learning", location="us-central1", experiment=experiment_name)
+
+            # Upload using the profile-specific function
+            aiplatform.upload_tb_log(
+                tensorboard_experiment_name=experiment_name,
+                tensorboard_id="8983295871953141760",
+                logdir=base_dir,
+                run_name_prefix=run_name,
+                allowed_plugins=frozenset(["profile"]),
+            )
+            print(f"Profile uploaded successfully to experiment: {experiment_name}")
+        except Exception as e:
+            print(f"Upload failed with error: {e}")
+            print("Full error details:", str(e))
+
     print(f"Arthmetic Intensity: {total_flops / total_num_bytes_crossing_hbm:.2f}")
     print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
 
+def verify_tensorboard_access():
+    aiplatform.init(project="cool-machine-learning", location="us-central1")
+    try:
+        tensorboard = aiplatform.Tensorboard("8983295871953141760")
+        print(f"Found tensorboard: {tensorboard.display_name}")
+        return True
+    except Exception as e:
+        print(f"Error accessing tensorboard: {e}")
+        return False
+
 if __name__ == "__main__":
+    # Clean up old profile data
+    os.system("rm -rf /tmp/tensorboard_logs/*")
+    os.system("rm -rf /tmp/profile_me")
+
     profile_dir = "/tmp/profile_me"
     A = jnp.ones((MATRIX_DIM, MATRIX_DIM))
     B = jnp.ones((MATRIX_DIM, MATRIX_DIM))
