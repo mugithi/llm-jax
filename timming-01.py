@@ -56,23 +56,18 @@ def upload_tensorboard_log_one_time_sample(
     print(f"- Directory contents:")
     os.system(f"find {logdir} -type f")
 
+    # Simple initialization as per docs
     aiplatform.init(project=project, location=location)
 
-    # one time upload with profile plugin enabled
-    try:
-        aiplatform.upload_tb_log(
-            tensorboard_id=tensorboard_id,
-            tensorboard_experiment_name=tensorboard_experiment_name,
-            logdir=logdir,
-            experiment_display_name=experiment_display_name,
-            run_name_prefix=run_name_prefix,
-            description=description,
-            allowed_plugins=frozenset(["profile"]),
-        )
-        print("Upload completed successfully")
-    except Exception as e:
-        print(f"Upload failed with error: {e}")
-        print("Full error details:", str(e))
+    # Simple upload as per docs
+    aiplatform.upload_tb_log(
+        tensorboard_id=tensorboard_id,
+        tensorboard_experiment_name=tensorboard_experiment_name,
+        logdir=logdir,
+        experiment_display_name=experiment_display_name,
+        run_name_prefix=run_name_prefix,
+        description=description,
+    )
 
 def print_memory_usage():
     devices = jax.devices()
@@ -140,29 +135,31 @@ def part_2(A, B, profile_dir = None):
 def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     assert task is not None, "Task must be provided"
 
-    # Create clean base directory
+    # Create clean base directory (this is our logdir)
     base_dir = "/tmp/profile_me"
     if os.path.exists(base_dir):
         os.system(f"rm -rf {base_dir}")
     os.makedirs(base_dir, exist_ok=True)
 
-    # Create run directory with simple name
-    run_name = "profile_run"
-    run_dir = os.path.join(base_dir, run_name)
-    os.makedirs(run_dir, exist_ok=True)
+    # Create temporary directory for JAX profiler
+    temp_dir = "/tmp/jax_profile_temp"
+    if os.path.exists(temp_dir):
+        os.system(f"rm -rf {temp_dir}")
+    os.makedirs(temp_dir, exist_ok=True)
 
-    # Create profile directory with expected structure
+    # Create the final directory structure: /RUN_NAME_PREFIX/plugins/profile/YYYY_MM_DD_HH_SS/
+    run_name = "profile_run"  # This is our RUN_NAME_PREFIX
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    profile_dir = os.path.join(run_dir, 'plugins', 'profile', timestamp)
-    os.makedirs(profile_dir, exist_ok=True)
+    final_profile_dir = os.path.join(base_dir, run_name, "plugins", "profile", timestamp)
+    os.makedirs(final_profile_dir, exist_ok=True)
+
+    print(f"\nStarting profiling to temporary directory: {temp_dir}")
+    # Start JAX profiler in temp directory
+    jax.profiler.start_trace(temp_dir, create_perfetto_trace=False)
 
     # Collect metrics and profile data
     outcomes_ms = []
     jax.block_until_ready(f(*args))  # Warmup
-
-    print(f"\nStarting profiling to: {profile_dir}")
-    # Start JAX profiler with Perfetto trace
-    jax.profiler.start_trace(profile_dir, create_perfetto_trace=True)
 
     for i in range(tries):
         s = datetime.datetime.now()
@@ -172,45 +169,61 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
         duration_ms = (e - s).total_seconds() * 1000
         outcomes_ms.append(duration_ms)
 
-    # Stop JAX profiler
+    # Stop JAX profiler and ensure data is written
     jax.profiler.stop_trace()
-    time.sleep(2)  # Ensure profile data is written
+    time.sleep(2)
 
-    # Print performance statistics
-    average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
-    multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
-    total_num_bytes_crossing_hbm = multiplier * args[0].size * 2
+    # Move profile files to correct location
+    print("\nMoving profile files to correct location...")
+    os.system(f"find {temp_dir} -type f -name '*.pb' -exec mv {{}} {final_profile_dir}/ \;")
+    os.system(f"find {temp_dir} -type f -name '*.json.gz' -exec mv {{}} {final_profile_dir}/ \;")
+    os.system(f"rm -rf {temp_dir}")
 
     print(f"\n\n","_"*90)
-    print(f"Profile data location: {profile_dir}")
+    print(f"Profile data location: {final_profile_dir}")
     print(f"Directory structure:")
     os.system(f"find {base_dir} -type f")
 
-    # Upload to managed TensorBoard
-    if os.path.exists(profile_dir):
+    # Upload with correct structure
+    if os.path.exists(final_profile_dir):
         print("\nUploading profile to managed TensorBoard...")
 
-        # Create valid experiment name - using hyphens instead of underscores
+        # Create valid experiment name
         clean_task = ''.join(c.lower() for c in task if c.isalnum() or c == ' ').replace(' ', '-')[:20]
-        # Format timestamp with hyphens instead of underscores
-        upload_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # Changed format
+        upload_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         experiment_name = f"exp-{upload_timestamp}-{clean_task}"
 
-        try:
-            aiplatform.init(project="cool-machine-learning", location="us-central1", experiment=experiment_name)
+        print(f"Debug - Directory structure before upload:")
+        os.system(f"find {base_dir} -type f")
+        print(f"Debug - Expected structure: {run_name}/plugins/profile/{timestamp}")
 
-            # Upload using the profile-specific function
+        try:
+            # Set environment variable to force the staging bucket
+            # os.environ["AIP_STAGING_BUCKET"] = "isaack-gcs-bucket"
+
+            # Initialize with our staging bucket
+            aiplatform.init(
+                project="cool-machine-learning",
+                location="us-central1",
+                # staging_bucket="isaack-gcs-bucket" ### Does not honor staging bucket
+            )
+            # (Debug line removed since aiplatform.global_config is unavailable.)
+
+            # Let Vertex AI manage storage and then upload the logs
             aiplatform.upload_tb_log(
+                tensorboard_id="7938196875612520448",
                 tensorboard_experiment_name=experiment_name,
-                tensorboard_id="8983295871953141760",
                 logdir=base_dir,
-                run_name_prefix=run_name,
-                allowed_plugins=frozenset(["profile"]),
+                run_name_prefix=run_name
             )
             print(f"Profile uploaded successfully to experiment: {experiment_name}")
         except Exception as e:
             print(f"Upload failed with error: {e}")
             print("Full error details:", str(e))
+
+    average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
+    multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
+    total_num_bytes_crossing_hbm = multiplier * args[0].size * 2
 
     print(f"Arthmetic Intensity: {total_flops / total_num_bytes_crossing_hbm:.2f}")
     print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
@@ -220,6 +233,9 @@ def verify_tensorboard_access():
     try:
         tensorboard = aiplatform.Tensorboard("8983295871953141760")
         print(f"Found tensorboard: {tensorboard.display_name}")
+        print(f"Tensorboard resource name: {tensorboard.resource_name}")
+        print(f"Tensorboard location: {tensorboard.location}")
+        print(f"Tensorboard storage: {tensorboard.store}")
         return True
     except Exception as e:
         print(f"Error accessing tensorboard: {e}")
