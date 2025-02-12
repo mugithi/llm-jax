@@ -82,14 +82,11 @@ def upload_profile_to_tensorboard(
     """Uploads profile logs to Vertex AI's TensorBoard by initializing the
        AI Platform with a specified staging bucket and calling upload_tb_log."""
     import os
-    # Force using your staging bucket via environment variable
-    os.environ["AIP_STAGING_BUCKET"] = "gs://isaack-gcs-bucket"
 
     # Initialize Vertex AI with your bucket
     aiplatform.init(
         project=project,
         location=location,
-        staging_bucket="gs://isaack-gcs-bucket"
     )
 
     # Upload the TensorBoard logs
