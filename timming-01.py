@@ -69,6 +69,39 @@ def upload_tensorboard_log_one_time_sample(
         description=description,
     )
 
+def upload_profile_to_tensorboard(
+    experiment_name: str,
+    base_dir: str,
+    run_name: str,
+    tensorboard_id: str,
+    project: str = "cool-machine-learning",
+    location: str = "us-central1",
+    experiment_display_name: Optional[str] = None,
+    description: Optional[str] = None
+) -> None:
+    """Uploads profile logs to Vertex AI's TensorBoard by initializing the
+       AI Platform with a specified staging bucket and calling upload_tb_log."""
+    import os
+    # Force using your staging bucket via environment variable
+    os.environ["AIP_STAGING_BUCKET"] = "gs://isaack-gcs-bucket"
+
+    # Initialize Vertex AI with your bucket
+    aiplatform.init(
+        project=project,
+        location=location,
+        staging_bucket="gs://isaack-gcs-bucket"
+    )
+
+    # Upload the TensorBoard logs
+    aiplatform.upload_tb_log(
+        tensorboard_id=tensorboard_id,
+        tensorboard_experiment_name=experiment_name,
+        logdir=base_dir,
+        run_name_prefix=run_name,
+        experiment_display_name=experiment_display_name,
+        description=description
+    )
+
 def print_memory_usage():
     devices = jax.devices()
     for device in devices:
@@ -132,6 +165,74 @@ def part_2(A, B, profile_dir = None):
     avg_time = (endtime - starttime).total_seconds() / STEPS
     print(f"Average time per step {avg_time:.4f} seconds | tera flops per sec {total_num_flops / avg_time / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / avg_time / 1e9:.2f}")
 
+def create_experiment_name(task: str) -> tuple[str, str]:
+    """Creates a valid experiment name and timestamp from a task name.
+
+    Args:
+        task: The task name to clean and use in experiment name
+
+    Returns:
+        tuple: (experiment_name, upload_timestamp)
+    """
+    clean_task = ''.join(c.lower() for c in task if c.isalnum() or c == ' ').replace(' ', '-')[:20]
+    upload_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    experiment_name = f"exp-{upload_timestamp}-{clean_task}"
+    return experiment_name, upload_timestamp
+
+def upload_profile_data(
+    profile_dir: str,
+    base_dir: str,
+    run_name: str,
+    task: str,
+    tensorboard_id: str = "7938196875612520448",
+    project: str = "cool-machine-learning",
+    location: str = "us-central1"
+) -> None:
+    """Uploads profile data to TensorBoard if the profile directory exists.
+
+    Args:
+        profile_dir: Directory containing the profile data
+        base_dir: Base directory containing the run directory
+        run_name: Name of the run directory
+        task: Task name for experiment naming
+        tensorboard_id: ID of the tensorboard instance
+        project: GCP project ID
+        location: GCP location
+    """
+    if not os.path.exists(profile_dir):
+        print(f"Profile directory {profile_dir} does not exist")
+        return
+
+    print("\nUploading profile to managed TensorBoard...")
+    experiment_name, upload_timestamp = create_experiment_name(task)
+
+    print(f"Debug - Directory structure before upload:")
+    os.system(f"find {base_dir} -type f")
+    print(f"Debug - Expected structure: {run_name}/plugins/profile/{upload_timestamp}")
+
+    # Print local TensorBoard viewing instructions
+    print(f"\nTo view profile locally, run:")
+    print(f"tensorboard --logdir={profile_dir}")
+    print(f"Then visit: http://localhost:6006")
+
+    try:
+        upload_profile_to_tensorboard(
+            experiment_name=experiment_name,
+            base_dir=base_dir,
+            run_name=run_name,
+            tensorboard_id=tensorboard_id,
+            project=project,
+            location=location,
+            experiment_display_name=f"Profile {upload_timestamp} - {task}",
+            description=f"Performance profile for {task}"
+        )
+        print(f"\nProfile uploaded successfully to experiment: {experiment_name}")
+        print(f"To view in Cloud TensorBoard, visit:")
+        print(f"https://{location}.tensorboard.googleusercontent.com/experiment/projects+{project}+locations+{location}+tensorboards+{tensorboard_id}+experiments+{experiment_name}")
+    except Exception as e:
+        print(f"Upload failed with error: {e}")
+        print("Full error details:", str(e))
+
 def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     assert task is not None, "Task must be provided"
 
@@ -184,42 +285,13 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     print(f"Directory structure:")
     os.system(f"find {base_dir} -type f")
 
-    # Upload with correct structure
-    if os.path.exists(final_profile_dir):
-        print("\nUploading profile to managed TensorBoard...")
-
-        # Create valid experiment name
-        clean_task = ''.join(c.lower() for c in task if c.isalnum() or c == ' ').replace(' ', '-')[:20]
-        upload_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        experiment_name = f"exp-{upload_timestamp}-{clean_task}"
-
-        print(f"Debug - Directory structure before upload:")
-        os.system(f"find {base_dir} -type f")
-        print(f"Debug - Expected structure: {run_name}/plugins/profile/{timestamp}")
-
-        try:
-            # Set environment variable to force the staging bucket
-            # os.environ["AIP_STAGING_BUCKET"] = "isaack-gcs-bucket"
-
-            # Initialize with our staging bucket
-            aiplatform.init(
-                project="cool-machine-learning",
-                location="us-central1",
-                # staging_bucket="isaack-gcs-bucket" ### Does not honor staging bucket
-            )
-            # (Debug line removed since aiplatform.global_config is unavailable.)
-
-            # Let Vertex AI manage storage and then upload the logs
-            aiplatform.upload_tb_log(
-                tensorboard_id="7938196875612520448",
-                tensorboard_experiment_name=experiment_name,
-                logdir=base_dir,
-                run_name_prefix=run_name
-            )
-            print(f"Profile uploaded successfully to experiment: {experiment_name}")
-        except Exception as e:
-            print(f"Upload failed with error: {e}")
-            print("Full error details:", str(e))
+    # Upload profile data
+    upload_profile_data(
+        profile_dir=final_profile_dir,
+        base_dir=base_dir,
+        run_name=run_name,
+        task=task
+    )
 
     average_time_ms = sum(outcomes_ms)/len(outcomes_ms) / 1000
     multiplier = 3 if len(args) == 2 else 6 if len(args) == 3 else 3
