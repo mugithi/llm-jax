@@ -4,11 +4,7 @@ os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
 import sys
 import contextlib
-# Temporarily redirect stderr to suppress early log messages from absl
-with open(os.devnull, 'w') as devnull, contextlib.redirect_stderr(devnull):
-    import absl.logging
-    absl.logging.set_verbosity(absl.logging.ERROR)
-    absl.logging.set_stderrthreshold("error")
+
 import datetime
 import jax
 import jax.numpy as jnp
@@ -35,12 +31,16 @@ STEPS = 10
 from google.cloud import aiplatform
 from typing import Optional
 
+# Global configuration
+PROJECT_NAME = "cool-machine-learning"
+TENSORBOARD_ID = "7938196875612520448"
+LOCATION = "us-central1"
+BASE_PROFILE_DIR = "/tmp/profile_me"
+TEMP_PROFILE_DIR = "/tmp/jax_profile_temp"
+
 def upload_tensorboard_log_one_time_sample(
     tensorboard_experiment_name: str,
     logdir: str,
-    tensorboard_id: str,
-    project: str,
-    location: str,
     experiment_display_name: Optional[str] = None,
     run_name_prefix: Optional[str] = None,
     description: Optional[str] = None,
@@ -48,20 +48,20 @@ def upload_tensorboard_log_one_time_sample(
 ) -> None:
     """Upload TensorBoard logs to Google Cloud AI Platform."""
     print(f"\nUploading to TensorBoard:")
-    print(f"- Project: {project}")
-    print(f"- Location: {location}")
-    print(f"- TensorBoard ID: {tensorboard_id}")
+    print(f"- Project: {PROJECT_NAME}")
+    print(f"- Location: {LOCATION}")
+    print(f"- TensorBoard ID: {TENSORBOARD_ID}")
     print(f"- Experiment name: {tensorboard_experiment_name}")
     print(f"- Local logdir: {logdir}")
     print(f"- Directory contents:")
     os.system(f"find {logdir} -type f")
 
     # Simple initialization as per docs
-    aiplatform.init(project=project, location=location)
+    aiplatform.init(project=PROJECT_NAME, location=LOCATION)
 
     # Simple upload as per docs
     aiplatform.upload_tb_log(
-        tensorboard_id=tensorboard_id,
+        tensorboard_id=TENSORBOARD_ID,
         tensorboard_experiment_name=tensorboard_experiment_name,
         logdir=logdir,
         experiment_display_name=experiment_display_name,
@@ -73,25 +73,14 @@ def upload_profile_to_tensorboard(
     experiment_name: str,
     base_dir: str,
     run_name: str,
-    tensorboard_id: str,
-    project: str = "cool-machine-learning",
-    location: str = "us-central1",
     experiment_display_name: Optional[str] = None,
     description: Optional[str] = None
 ) -> None:
-    """Uploads profile logs to Vertex AI's TensorBoard by initializing the
-       AI Platform with a specified staging bucket and calling upload_tb_log."""
-    import os
+    """Uploads profile logs to Vertex AI's TensorBoard."""
+    aiplatform.init(project=PROJECT_NAME, location=LOCATION)
 
-    # Initialize Vertex AI with your bucket
-    aiplatform.init(
-        project=project,
-        location=location,
-    )
-
-    # Upload the TensorBoard logs
     aiplatform.upload_tb_log(
-        tensorboard_id=tensorboard_id,
+        tensorboard_id=TENSORBOARD_ID,
         tensorboard_experiment_name=experiment_name,
         logdir=base_dir,
         run_name_prefix=run_name,
@@ -181,21 +170,8 @@ def upload_profile_data(
     base_dir: str,
     run_name: str,
     task: str,
-    tensorboard_id: str = "7938196875612520448",
-    project: str = "cool-machine-learning",
-    location: str = "us-central1"
 ) -> None:
-    """Uploads profile data to TensorBoard if the profile directory exists.
-
-    Args:
-        profile_dir: Directory containing the profile data
-        base_dir: Base directory containing the run directory
-        run_name: Name of the run directory
-        task: Task name for experiment naming
-        tensorboard_id: ID of the tensorboard instance
-        project: GCP project ID
-        location: GCP location
-    """
+    """Uploads profile data to TensorBoard if the profile directory exists."""
     if not os.path.exists(profile_dir):
         print(f"Profile directory {profile_dir} does not exist")
         return
@@ -207,7 +183,6 @@ def upload_profile_data(
     os.system(f"find {base_dir} -type f")
     print(f"Debug - Expected structure: {run_name}/plugins/profile/{upload_timestamp}")
 
-    # Print local TensorBoard viewing instructions
     print(f"\nTo view profile locally, run:")
     print(f"tensorboard --logdir={profile_dir}")
     print(f"Then visit: http://localhost:6006")
@@ -217,15 +192,12 @@ def upload_profile_data(
             experiment_name=experiment_name,
             base_dir=base_dir,
             run_name=run_name,
-            tensorboard_id=tensorboard_id,
-            project=project,
-            location=location,
             experiment_display_name=f"Profile {upload_timestamp} - {task}",
             description=f"Performance profile for {task}"
         )
         print(f"\nProfile uploaded successfully to experiment: {experiment_name}")
         print(f"To view in Cloud TensorBoard, visit:")
-        print(f"https://{location}.tensorboard.googleusercontent.com/experiment/projects+{project}+locations+{location}+tensorboards+{tensorboard_id}+experiments+{experiment_name}")
+        print(f"https://{LOCATION}.tensorboard.googleusercontent.com/experiment/projects+{PROJECT_NAME}+locations+{LOCATION}+tensorboards+{TENSORBOARD_ID}+experiments+{experiment_name}")
     except Exception as e:
         print(f"Upload failed with error: {e}")
         print("Full error details:", str(e))
@@ -234,26 +206,24 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     assert task is not None, "Task must be provided"
 
     # Create clean base directory (this is our logdir)
-    base_dir = "/tmp/profile_me"
-    if os.path.exists(base_dir):
-        os.system(f"rm -rf {base_dir}")
-    os.makedirs(base_dir, exist_ok=True)
+    if os.path.exists(BASE_PROFILE_DIR):
+        os.system(f"rm -rf {BASE_PROFILE_DIR}")
+    os.makedirs(BASE_PROFILE_DIR, exist_ok=True)
 
     # Create temporary directory for JAX profiler
-    temp_dir = "/tmp/jax_profile_temp"
-    if os.path.exists(temp_dir):
-        os.system(f"rm -rf {temp_dir}")
-    os.makedirs(temp_dir, exist_ok=True)
+    if os.path.exists(TEMP_PROFILE_DIR):
+        os.system(f"rm -rf {TEMP_PROFILE_DIR}")
+    os.makedirs(TEMP_PROFILE_DIR, exist_ok=True)
 
-    # Create the final directory structure: /RUN_NAME_PREFIX/plugins/profile/YYYY_MM_DD_HH_SS/
-    run_name = "profile_run"  # This is our RUN_NAME_PREFIX
+    # Create the final directory structure
+    run_name = "profile_run"
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    final_profile_dir = os.path.join(base_dir, run_name, "plugins", "profile", timestamp)
+    final_profile_dir = os.path.join(BASE_PROFILE_DIR, run_name, "plugins", "profile", timestamp)
     os.makedirs(final_profile_dir, exist_ok=True)
 
-    print(f"\nStarting profiling to temporary directory: {temp_dir}")
+    print(f"\nStarting profiling to temporary directory: {TEMP_PROFILE_DIR}")
     # Start JAX profiler in temp directory
-    jax.profiler.start_trace(temp_dir, create_perfetto_trace=False)
+    jax.profiler.start_trace(TEMP_PROFILE_DIR, create_perfetto_trace=False)
 
     # Collect metrics and profile data
     outcomes_ms = []
@@ -273,19 +243,19 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
 
     # Move profile files to correct location
     print("\nMoving profile files to correct location...")
-    os.system(f"find {temp_dir} -type f -name '*.pb' -exec mv {{}} {final_profile_dir}/ \;")
-    os.system(f"find {temp_dir} -type f -name '*.json.gz' -exec mv {{}} {final_profile_dir}/ \;")
-    os.system(f"rm -rf {temp_dir}")
+    os.system(f"find {TEMP_PROFILE_DIR} -type f -name '*.pb' -exec mv {{}} {final_profile_dir}/ \;")
+    os.system(f"find {TEMP_PROFILE_DIR} -type f -name '*.json.gz' -exec mv {{}} {final_profile_dir}/ \;")
+    os.system(f"rm -rf {TEMP_PROFILE_DIR}")
 
     print(f"\n\n","_"*90)
     print(f"Profile data location: {final_profile_dir}")
     print(f"Directory structure:")
-    os.system(f"find {base_dir} -type f")
+    os.system(f"find {BASE_PROFILE_DIR} -type f")
 
     # Upload profile data
     upload_profile_data(
         profile_dir=final_profile_dir,
-        base_dir=base_dir,
+        base_dir=BASE_PROFILE_DIR,
         run_name=run_name,
         task=task
     )
@@ -298,9 +268,9 @@ def part_3(f, *args, total_flops, tries=10, task = None, profile_dir = None):
     print(f"Average time per step for {task} is {average_time_ms:.4f} seconds | tera flops per sec {total_flops / average_time_ms / 1e12:.2f} |  gigabytes per sec {total_num_bytes_crossing_hbm / average_time_ms / 1e9:.2f}")
 
 def verify_tensorboard_access():
-    aiplatform.init(project="cool-machine-learning", location="us-central1")
+    aiplatform.init(project=PROJECT_NAME, location=LOCATION)
     try:
-        tensorboard = aiplatform.Tensorboard("8983295871953141760")
+        tensorboard = aiplatform.Tensorboard(TENSORBOARD_ID)
         print(f"Found tensorboard: {tensorboard.display_name}")
         print(f"Tensorboard resource name: {tensorboard.resource_name}")
         print(f"Tensorboard location: {tensorboard.location}")
@@ -312,8 +282,7 @@ def verify_tensorboard_access():
 
 if __name__ == "__main__":
     # Clean up old profile data
-    os.system("rm -rf /tmp/tensorboard_logs/*")
-    os.system("rm -rf /tmp/profile_me")
+    os.system(f"rm -rf {BASE_PROFILE_DIR}")
 
     profile_dir = "/tmp/profile_me"
     A = jnp.ones((MATRIX_DIM, MATRIX_DIM))
