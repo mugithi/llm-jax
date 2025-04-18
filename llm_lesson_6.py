@@ -559,18 +559,18 @@ def run_concept5(profile=False):
                 break
 
             if 'text' not in example:
-                raise KeyError(f"'text' key missing in batch at iteration {iter_count}")
+               raise KeyError(f"'text' key missing in batch at iteration {iter_count}")
 
             outputs = convert_to_ascii(example['text'], SEQUENCE_LENGTH)
             inputs = input_to_output(outputs)
 
-        new_time = time.time()
-        loss, state = jitted_step(state, state.apply_fn, inputs, outputs)
+            new_time = time.time()
+            loss, state = jitted_step(state, state.apply_fn, inputs, outputs)
 
-        end_time = time.time()
-        print(f"Loss: {loss:.4f} Time taken for iteration {iter_count}: {end_time - new_time:.4f} seconds")
+            end_time = time.time()
+            print(f"Loss: {loss:.4f} Time taken for iteration {iter_count}: {end_time - new_time:.4f} seconds")
 
-        iter_count += 1
+            iter_count += 1
 
     # Run the JIT training with profiling if enabled
     setup_and_run_profiler(f"concept{concept_num}_jit", run_training_jit, profile=profile)
@@ -594,40 +594,51 @@ def run_concept6(profile=False):
             sequence_length=SEQUENCE_LENGTH
         )
 
-    rngkey = jax.random.key(0)
-    model = model_cls()
+        rngkey = jax.random.key(0)
+        model = model_cls()
 
-    init_shape = (BATCH_IN_SEQUENCES, SEQUENCE_LENGTH)
-    params = model.init(rngkey, jnp.ones(init_shape, dtype=jnp.uint8))['params']
-    tx = optax.adam(learning_rate=LEARNING_RATE)
-    state = train_state.TrainState.create(
+        init_shape = (BATCH_IN_SEQUENCES, SEQUENCE_LENGTH)
+        params = model.init(rngkey, jnp.ones(init_shape, dtype=jnp.uint8))['params']
+        tx = optax.adam(learning_rate=LEARNING_RATE)
+        state = train_state.TrainState.create(
            apply_fn=model.apply,
            params=params,
            tx=tx
         )
 
 
-    print("Starting JIT training loop...")
-    # --- FIX: Initialize num_step here ---
-    num_step = 0
-    # -------------------------------------
-    for example in ds:
-        # Changed iter_count to num_step for consistency with the error message
-        if num_step >= MAX_ITERS:
-            print(f"Reached max iterations ({MAX_ITERS}). Stopping.")
-            break
+        print("Starting JIT training loop...")
+        # --- FIX: Initialize num_step here ---
+        last_step_time = time.time()
+        num_step = 0
+        # -------------------------------------
+        for example in ds:
+            # Changed iter_count to num_step for consistency with the error message
+            if num_step >= MAX_ITERS:
+                print(f"Reached max iterations ({MAX_ITERS}). Stopping.")
+                break
 
-        if 'text' not in example:
-            raise KeyError(f"'text' key missing in batch at iteration {num_step}") # Use num_step here too
+            if 'text' not in example:
+               raise KeyError(f"'text' key missing in batch at iteration {num_step}") # Use num_step here too
 
-        outputs = convert_to_ascii(example['text'], SEQUENCE_LENGTH)
-        inputs = input_to_output(outputs)
+            outputs = convert_to_ascii(example['text'], SEQUENCE_LENGTH)
+            inputs = input_to_output(outputs)
 
-        loss, state = jitted_step(state, state.apply_fn, inputs, outputs)
-        loss.block_until_ready()
+            loss, state = jitted_step(state, state.apply_fn, inputs, outputs)
+            num_step +=1
 
-        print(f"Iter {num_step} -> Loss: {loss:.4f}") # Use num_step here too
-        num_step += 1
+
+            ### accessing loss value from within jax jit function causes a performance hit.
+            ### other techniques involve requesting the loss value after you process the batch and processing the next batch
+            if num_step % 10  == 0:
+                new_time = time.time()
+                last_step_time = new_time
+                print(f"Loss: {loss:.5f} Time taken for iteration {num_step}: {new_time - last_step_time:.5f} seconds")
+
+
+            ### Check where a metrics sits
+            # outputs.device()
+            ### Should report device 0
 
     # Run the JIT training with profiling if enabled
     setup_and_run_profiler(f"concept{concept_num}_jit", run_training_jit, profile=profile)
@@ -639,82 +650,41 @@ def run_concept7(profile=False):
      Running sharding the data and tensors across multiple tpu chips
     """
     concept_num = 7
-    model_cls = ModelConcept7 # Use the sharded model
 
     # Define the mesh outside the inner function
     mesh = jax.sharding.Mesh(np.reshape(np.arange(jax.device_count()), (FSDP, TENSOR_PARALLELISM)), ('data_parallel', 'tensor_parallel'))
-    print(f"Defined mesh: {mesh}")
 
-    # --- Define the training function ---
-    def run_training_sharded():
-        print(f"\n--- Running Concept {concept_num} (Sharded with JIT) ---")
+    def run_training_jit():
+        model_cls = ModelConcept7
+        print(f"\n--- Running Concept {concept_num} (with JIT) ---")
 
-        # Load dataset (remains outside mesh context)
+        # Use the helper function to load the dataset
         ds, info = load_language_modeling_dataset(
             dataset_name='lm1b',
             batch_size=BATCH_IN_SEQUENCES,
             sequence_length=SEQUENCE_LENGTH
         )
 
-        # --- Operations within the mesh context ---
-        with mesh:
-            print("Initializing model and state within mesh context...")
-            rngkey = jax.random.key(0)
-            model = model_cls()
-            init_shape = (BATCH_IN_SEQUENCES, SEQUENCE_LENGTH)
+        rngkey = jax.random.key(0)
+        model = model_cls()
 
-            # Abstract init to get partitioning info
-            abstract_init = jax.eval_shape(lambda: model.init(rngkey, jnp.ones(init_shape, dtype=jnp.uint8)))
-            parameter_sharding = nn.get_partition_spec(abstract_init)
-            # print("Inferred Parameter Partitioning Spec:", parameter_sharding) # Optional debug print
+        init_shape = (BATCH_IN_SEQUENCES, SEQUENCE_LENGTH)
 
-            # Initialize parameters with explicit sharding based on model annotations
-            params = jax.jit(
-                model.init,
-                static_argnums=(0,), # rngkey is static for init shape eval but not actual init? Check Flax docs. Often just need the method itself.
-                out_shardings=parameter_sharding # Apply the inferred sharding
-            )(rngkey, jnp.ones(init_shape, dtype=jnp.uint8))['params']
+        # Using with_mesh context here would be ideal, but for simplicity in this patch:
+        shaped_init = jax.eval_shape(functools.partial(model.init, rngkey), jax.ShapeDtypeStruct(init_shape, dtype=jnp.uint8))
+        # Initialize parameters (ideally inside with mesh: context)
+        params = model.init(rngkey, jnp.ones(init_shape, dtype=jnp.uint8))['params']
+        tx = optax.adam(learning_rate=LEARNING_RATE)
+        state = train_state.TrainState.create(
+           apply_fn=model.apply,
+           params=params,
+           tx=tx
+        )
 
+        jitted_step = jax.jit(step, static_argnums=(1,))
 
-            print("Parameter sharding after init:")
-            jax.tree_util.tree_map_with_path(lambda path, x: print(f"{path}: {x.shape} {x.sharding}"), params)
-
-            tx = optax.adam(learning_rate=LEARNING_RATE)
-
-            # Create TrainState - apply_fn doesn't need sharding, but params do
-            # Infer sharding for the state based on parameter sharding
-            state_sharding = train_state.TrainState.create_partition_spec(params)
-            # print("Inferred State Partitioning Spec:", state_sharding) # Optional debug print
-
-            state = train_state.TrainState.create(
-               apply_fn=model.apply,
-               params=params, # Params are already sharded
-               tx=tx
-            )
-            # Ensure state itself respects the sharding
-            state = jax.device_put(state, state_sharding)
-            print("State sharding:")
-            jax.tree_util.tree_map_with_path(lambda path, x: print(f"{path}: {type(x)} {getattr(x, 'sharding', 'Not sharded')}"), state)
-
-
-            # JIT compile the step function within the mesh context
-            print("JIT Compiling step function within mesh context...")
-            jitted_step = jax.jit(
-                step,
-                in_shardings=(state_sharding, None, None, None), # Shard state, replicate others
-                out_shardings=(None, state_sharding), # Shard output state, replicate loss
-                static_argnums=(1,) # model_apply_fn is static
-            )
-            print("JIT Compilation complete.")
-
-        # --- Training loop (can be outside mesh context, jitted_step carries sharding info) ---
-        print("Starting Sharded JIT training loop...")
+        print("Starting JIT training loop...")
         iter_count = 0
-        # Input sharding spec (replicate across data parallel dimension)
-        input_spec = jax.sharding.PartitionSpec('data_parallel')
-        # Create NamedSharding objects once outside the loop
-        input_sharding = jax.sharding.NamedSharding(mesh, input_spec)
-
         for example in ds:
             if iter_count >= MAX_ITERS:
                 print(f"Reached max iterations ({MAX_ITERS}). Stopping.")
@@ -723,33 +693,19 @@ def run_concept7(profile=False):
             if 'text' not in example:
                raise KeyError(f"'text' key missing in batch at iteration {iter_count}")
 
-            # Data prep remains standard
-            outputs_np = convert_to_ascii(example['text'], SEQUENCE_LENGTH)
-            inputs_np = input_to_output(outputs_np)
+            outputs = convert_to_ascii(example['text'], SEQUENCE_LENGTH)
+            inputs = input_to_output(outputs)
 
-            # Shard inputs and outputs before passing to JITted function
-            # Use device_put with the NamedSharding object
-            inputs = jax.device_put(inputs_np, input_sharding)
-            outputs = jax.device_put(outputs_np, input_sharding)
-
-            # --- Add timing here ---
-            start_step_time = time.time()
-
-            # Execute the JITted step
+            new_time = time.time()
             loss, state = jitted_step(state, state.apply_fn, inputs, outputs)
-            loss.block_until_ready() # Ensure computation completes before measuring time
 
-            end_step_time = time.time()
-            step_duration = end_step_time - start_step_time
-            # --- End timing ---
+            end_time = time.time()
+            print(f"Loss: {loss:.4f} Time taken for iteration {iter_count}: {end_time - new_time:.4f} seconds")
 
-
-            # Print loss and step time
-            print(f"Iter {iter_count} -> Loss: {loss:.4f} | Step Time: {step_duration:.4f} sec")
             iter_count += 1
 
-    # --- Run the sharded training with the profiler ---
-    setup_and_run_profiler(f"concept{concept_num}_sharded_jit", run_training_sharded, profile=profile)
+    # Run the JIT training with profiling if enabled
+    setup_and_run_profiler(f"concept{concept_num}_sharded_jit", run_training_jit, profile=profile)
     print(f"--- Concept {concept_num} (Sharded JIT) Finished ---")
 
 
