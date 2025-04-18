@@ -5,14 +5,21 @@ description = "JAX Benchmarking Project"
 authors = ["mugithi <isackaranja@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.9"
-grpcio = "1.60.1"
+python = ">=3.10,<3.11"
+grpcio = ">=1.62.1,<1.63.0"
 grpcio-status = "1.60.1"
 jax = "*"
 jaxlib = "*"
 tensorflow = "*"
 absl-py = "*"
 numpy = "*"
+flax = "*"
+tensorflow-datasets = "^4.9.8"
+apache-beam = "^2.64.0"
+datasets = "^3.5.0"
+huggingface-hub = "^0.30.2"
+google-cloud-aiplatform = "^1.89.0"
+tensorboard-plugin-profile = "^2.19.4"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
